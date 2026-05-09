@@ -1,6 +1,7 @@
 import pandas as pd
 from typing import List, Dict, Any
 from jinja2 import Environment, select_autoescape
+import json
 
 def format_inr(value):
     try:
@@ -169,6 +170,34 @@ class Reporter:
                 'loans': loans_list
             })
 
+        # Prepare chart data
+        months = sorted(opt_df['month_index'].unique())
+        chart_labels = [f"Month {int(m)}" for m in months]
+        chart_datasets = []
+        
+        colors = ['#3498db', '#e74c3c', '#2ecc71', '#f1c40f', '#9b59b6', '#34495e', '#e67e22', '#1abc9c']
+        
+        for idx, loan_id in enumerate(self.loans.keys()):
+            loan_data = opt_df[opt_df['loan_id'] == loan_id].sort_values('month_index')
+            balances = []
+            for m in months:
+                row = loan_data[loan_data['month_index'] == m]
+                if not row.empty:
+                    balances.append(float(row['ending_balance'].iloc[0]))
+                else:
+                    balances.append(0)
+            chart_datasets.append({
+                'label': loan_id,
+                'data': balances,
+                'fill': True,
+                'backgroundColor': colors[idx % len(colors)] + '40',
+                'borderColor': colors[idx % len(colors)],
+                'tension': 0.4
+            })
+            
+        chart_labels_json = json.dumps(chart_labels)
+        chart_datasets_json = json.dumps(chart_datasets)
+
         template_str = """
         <!DOCTYPE html>
         <html lang="en">
@@ -244,6 +273,11 @@ class Reporter:
                             <h3>Months Saved</h3>
                             <p class="positive">{{ summary.months_saved }}</p>
                         </div>
+                    </div>
+
+                    <h2>Loan Payoff Graph</h2>
+                    <div class="chart-container" style="position: relative; height:400px; width:100%; margin-bottom: 30px; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e1e8ed; box-sizing: border-box;">
+                        <canvas id="payoffChart"></canvas>
                     </div>
 
                     <h2>Month 1: Income Allocation Breakdown</h2>
@@ -347,6 +381,7 @@ class Reporter:
                 </div>
             </div>
 
+            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
             function openTab(evt, tabName) {
                 var i, tabcontent, tablinks;
@@ -366,6 +401,61 @@ class Reporter:
                 document.getElementById(tabName).classList.add("active");
                 evt.currentTarget.classList.add("active");
             }
+
+            const ctx = document.getElementById('payoffChart').getContext('2d');
+            const payoffChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: {{ chart_labels_json|safe }},
+                    datasets: {{ chart_datasets_json|safe }}
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    interaction: {
+                        mode: 'index',
+                        intersect: false,
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                label: function(context) {
+                                    let label = context.dataset.label || '';
+                                    if (label) {
+                                        label += ': ';
+                                    }
+                                    if (context.parsed.y !== null) {
+                                        label += new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(context.parsed.y);
+                                    }
+                                    return label;
+                                }
+                            }
+                        }
+                    },
+                    scales: {
+                        x: {
+                            display: true,
+                            title: {
+                                display: true,
+                                text: 'Month'
+                            }
+                        },
+                        y: {
+                            stacked: true,
+                            display: true,
+                            title: {
+                                display: true,
+                                text: 'Outstanding Balance (₹)'
+                            },
+                            ticks: {
+                                callback: function(value, index, values) {
+                                    return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumSignificantDigits: 3 }).format(value);
+                                }
+                            }
+                        }
+                    }
+                }
+            });
             </script>
         </body>
         </html>
@@ -378,7 +468,9 @@ class Reporter:
             allocations=allocations,
             loans=loans_data,
             master_schedule=master_schedule,
-            base_income=format_inr(base_income)
+            base_income=format_inr(base_income),
+            chart_labels_json=chart_labels_json,
+            chart_datasets_json=chart_datasets_json
         )
         
         with open(output_path, 'w', encoding='utf-8') as f:
