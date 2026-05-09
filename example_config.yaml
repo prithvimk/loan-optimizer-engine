@@ -1,0 +1,36 @@
+cashflow:
+  monthly_income: 150000
+  fixed_living_expenses: 40000
+  emergency_buffer: 10000
+  income_growth_rate_annual: 0.05
+  expense_inflation_rate_annual: 0.06
+  irregular_outflows:
+    12: 25000 # Annual insurance or festival expense
+  irregular_inflows:
+    - date: "2026-12-01"
+      amount: 100000 # Example end of year bonus
+
+loans:
+  - loan_id: "Sample Home Loan"
+    principal: 5000000
+    annual_interest_rate: 0.085
+    interest_method: "MONTHLY"
+    repayment_type: "EMI"
+    tenure_months: 240
+    start_date: "2026-01-01"
+  
+  - loan_id: "Sample Gold Loan"
+    principal: 500000
+    annual_interest_rate: 0.09
+    interest_method: "MONTHLY"
+    repayment_type: "INTEREST_ONLY"
+    tenure_months: 12
+    start_date: "2026-06-01"
+
+  - loan_id: "Sample Personal Loan"
+    principal: 800000
+    annual_interest_rate: 0.12
+    interest_method: "MONTHLY"
+    repayment_type: "EMI"
+    tenure_months: 36
+    start_date: "2026-03-01"
