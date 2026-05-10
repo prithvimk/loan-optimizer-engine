@@ -3,22 +3,27 @@ from decimal import Decimal
 from enum import Enum, auto
 from datetime import date
 
+
 class InterestMethod(Enum):
     """Defines how interest is compounded/calculated."""
+
     MONTHLY = auto()
     DAILY = auto()
 
+
 class RepaymentType(Enum):
     """Defines the repayment structure of the loan."""
-    EMI = auto()            # Equated Monthly Installment
+
+    EMI = auto()  # Equated Monthly Installment
     INTEREST_ONLY = auto()  # Pay interest monthly, principal due at end of tenure
-    BULLET = auto()         # No payments until end of tenure, then Principal + Interest
+    BULLET = auto()  # No payments until end of tenure, then Principal + Interest
+
 
 @dataclass
 class Loan:
     """
     Core data structure representing a single debt instrument.
-    
+
     Attributes:
         loan_id: Unique string identifier for the loan
         principal: Initial loan amount
@@ -29,6 +34,7 @@ class Loan:
         start_date: Origination date of the loan
         allows_prepayment: Whether the optimizer is allowed to allocate surplus to this loan
     """
+
     loan_id: str
     principal: Decimal
     annual_interest_rate: Decimal
