@@ -290,9 +290,72 @@ class Reporter:
                 }
             )
 
-        # Generate master amortization schedule (grouped by month)
-        opt_df_sorted = opt_df.sort_values(by=["month_index", "loan_id"])
-        master_schedule = []
+        # Actual debt status uses only the independently maintained actual ledger.
+        actual_status = []
+        actual_rows = opt_df[opt_df["actual_ending_balance"].notna()]
+        for loan_id in self.loans:
+            loan_actual_rows = actual_rows[actual_rows["loan_id"] == loan_id].sort_values(
+                "month_index"
+            )
+            if loan_actual_rows.empty:
+                actual_status.append(
+                    {
+                        "loan_id": loan_id,
+                        "balance": "—",
+                        "interest": "—",
+                        "payments": "—",
+                        "pending": "—",
+                        "last_payment_month": "—",
+                        "pending_value": Decimal("-1"),
+                        "balance_value": Decimal("-1"),
+                    }
+                )
+                continue
+
+            latest = loan_actual_rows.iloc[-1]
+            payment_rows = loan_actual_rows[loan_actual_rows["actual_payment"] > 0]
+            last_payment_month = (
+                payment_rows.iloc[-1]["date"].strftime("%b %Y")
+                if not payment_rows.empty
+                else "—"
+            )
+            pending = latest["actual_accumulated_pending_payment"]
+            actual_status.append(
+                {
+                    "loan_id": loan_id,
+                    "balance": format_inr(latest["actual_ending_balance"]),
+                    "interest": format_inr(loan_actual_rows["actual_interest"].sum()),
+                    "payments": format_inr(loan_actual_rows["actual_payment"].sum()),
+                    "pending": format_inr(pending),
+                    "last_payment_month": last_payment_month,
+                    "pending_value": Decimal(str(pending)),
+                    "balance_value": Decimal(str(latest["actual_ending_balance"])),
+                }
+            )
+        actual_status.sort(
+            key=lambda item: (item["pending_value"], item["balance_value"]), reverse=True
+        )
+
+        actual_snapshot = {
+            "balance": format_inr(
+                sum(item["balance_value"] for item in actual_status if item["balance_value"] >= 0)
+            ),
+            "interest": format_inr(actual_rows["actual_interest"].sum()),
+            "pending": format_inr(
+                sum(item["pending_value"] for item in actual_status if item["pending_value"] >= 0)
+            ),
+            "latest_month": (
+                actual_rows["date"].max().strftime("%b %Y")
+                if not actual_rows.empty
+                else "—"
+            ),
+        }
+
+        # Projected payoff plan intentionally excludes actual-ledger-only rows.
+        opt_df_sorted = opt_df[
+            opt_df["projected_starting_balance"].notna()
+        ].sort_values(by=["month_index", "loan_id"])
+        projected_schedule = []
 
         for (m_idx, m_date), group in opt_df_sorted.groupby(["month_index", "date"]):
             month_str = m_date.strftime("%B %Y")
@@ -319,7 +382,7 @@ class Reporter:
                         "actual_end": format_inr(row["actual_ending_balance"]),
                     }
                 )
-            master_schedule.append(
+            projected_schedule.append(
                 {
                     "month_index": int(m_idx),
                     "month_str": f"Month {int(m_idx)} &bull; {month_str}",
@@ -367,7 +430,8 @@ class Reporter:
                 .month-group { margin-bottom: 30px; background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow: visible; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
                 .month-header { background-color: #34495e; color: #fff; padding: 12px 20px; font-weight: bold; font-size: 15px; }
                 .table-scroll { overflow-x: auto; border-radius: 0 0 8px 8px; }
-                .month-group table { min-width: 2050px; margin-top: 0; border: none; box-shadow: none; }
+                .month-group table { min-width: 1250px; margin-top: 0; border: none; box-shadow: none; }
+                .actual-status-table { margin-top: 0; }
                 .month-group th { background-color: #f8fafc; color: #7f8c8d; border-bottom: 2px solid #e1e8ed; font-size: 12px; }
                 .month-group td, .month-group th { padding: 10px 20px; }
                 .footer { margin-top: 40px; text-align: center; font-size: 12px; color: #bdc3c7; }
@@ -413,12 +477,31 @@ class Reporter:
                 <h1>Loan Optimization Report</h1>
                 
                 <div class="tabs">
-                    <button class="tab-button active" onclick="openTab(event, 'Summary')">Portfolio Summary</button>
-                    <button class="tab-button" onclick="openTab(event, 'MasterSchedule')">Master Schedule</button>
+                    <button class="tab-button active" onclick="openTab(event, 'ActualDebt')">Actual Debt Status</button>
+                    <button class="tab-button" onclick="openTab(event, 'Summary')">Portfolio Summary</button>
+                    <button class="tab-button" onclick="openTab(event, 'ProjectedPlan')">Projected Payoff Plan</button>
+                </div>
+
+                <!-- ACTUAL DEBT TAB -->
+                <div id="ActualDebt" class="tab-content active">
+                    <h2>Actual Debt Status</h2>
+                    <p style="font-size: 14px; color: #555;">Actual figures are based only on recorded payments through {{ actual_snapshot.latest_month }}.</p>
+                    <table class="actual-status-table">
+                        <thead><tr>
+                            <th>Loan</th><th>Actual Balance</th><th>Cumulative Interest Accrued</th>
+                            <th>Actual Payments</th><th>Accumulated Pending Payment</th><th>Last Recorded Payment</th>
+                        </tr></thead>
+                        <tbody>{% for loan in actual_status %}<tr>
+                            <td><strong>{{ loan.loan_id }}</strong></td><td>{{ loan.balance }}</td>
+                            <td>{{ loan.interest }}</td><td>{{ loan.payments }}</td>
+                            {% if loan.pending_value > 0 %}<td class="warning">{{ loan.pending }}</td>{% else %}<td>{{ loan.pending }}</td>{% endif %}
+                            <td>{{ loan.last_payment_month }}</td>
+                        </tr>{% endfor %}</tbody>
+                    </table>
                 </div>
                 
                 <!-- SUMMARY TAB -->
-                <div id="Summary" class="tab-content active">
+                <div id="Summary" class="tab-content">
                     <h2>Portfolio Summary</h2>
                     <div class="summary-cards">
                         <div class="card">
@@ -441,6 +524,14 @@ class Reporter:
                             <h3>Months Saved</h3>
                             <p class="positive">{{ summary.months_saved }}</p>
                         </div>
+                    </div>
+
+                    <h2>Actual Debt Snapshot</h2>
+                    <div class="summary-cards">
+                        <div class="card"><h3>Actual Balance</h3><p>{{ actual_snapshot.balance }}</p></div>
+                        <div class="card"><h3>Cumulative Actual Interest</h3><p>{{ actual_snapshot.interest }}</p></div>
+                        <div class="card highlight"><h3>Accumulated Pending</h3><p class="warning">{{ actual_snapshot.pending }}</p></div>
+                        <div class="card"><h3>Latest Actual Month</h3><p>{{ actual_snapshot.latest_month }}</p></div>
                     </div>
 
                     <h2>Loan Payoff Graph</h2>
@@ -502,10 +593,10 @@ class Reporter:
                     </table>
                 </div>
 
-                <!-- MASTER SCHEDULE TAB -->
-                <div id="MasterSchedule" class="tab-content">
-                    <h2>Master Amortization Schedule</h2>
-                    {% for month_group in master_schedule %}
+                <!-- PROJECTED PAYOFF TAB -->
+                <div id="ProjectedPlan" class="tab-content">
+                    <h2>Projected Payoff Plan</h2>
+                    {% for month_group in projected_schedule %}
                     <div class="month-group">
                         <div class="month-header">{{ month_group.month_str|safe }}</div>
                         <div class="table-scroll">
@@ -522,13 +613,6 @@ class Reporter:
                                     <th>Projected End</th>
                                     <th>Projected Closed</th>
                                     <th>Projected Rollover</th>
-                                    <th>Actual Start</th>
-                                    <th>Actual Interest</th>
-                                    <th>Actual Required</th>
-                                    <th>Actual Payment</th>
-                                    <th>Actual Pending</th>
-                                    <th>Actual Accumulated Pending</th>
-                                    <th>Actual End</th>
                                 </tr>
                             </thead>
                             <tbody>
@@ -548,13 +632,6 @@ class Reporter:
                                     {% else %}
                                     <td></td>
                                     {% endif %}
-                                    <td>{{ row.actual_start }}</td>
-                                    <td>{{ row.actual_interest }}</td>
-                                    <td>{{ row.actual_required }}</td>
-                                    <td>{{ row.actual_payment }}</td>
-                                    <td>{{ row.actual_pending }}</td>
-                                    <td><strong>{{ row.actual_accumulated_pending }}</strong></td>
-                                    <td>{{ row.actual_end }}</td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
@@ -599,7 +676,9 @@ class Reporter:
             summary=summary_stats,
             allocations=allocations,
             loans=loans_data,
-            master_schedule=master_schedule,
+            actual_status=actual_status,
+            actual_snapshot=actual_snapshot,
+            projected_schedule=projected_schedule,
             base_income=format_inr(base_income),
             chart_svg=chart_svg,
         )

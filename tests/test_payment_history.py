@@ -187,6 +187,33 @@ def test_reporter_exports_and_renders_arrears_columns(tmp_path):
     report_path = tmp_path / "report.html"
     reporter.generate_html_report(report_path)
     report = report_path.read_text(encoding="utf-8")
-    assert "Actual Accumulated Pending" in report
+    assert "Actual Debt Status" in report
+    assert "Accumulated Pending Payment" in report
     assert "Projected Required" in report
     assert 'class="table-scroll"' in report
+    assert "Actual Start" not in report
+
+
+def test_actual_status_uses_latest_actual_ledger_values_and_sorts_by_pending(tmp_path):
+    crop = Loan(
+        loan_id="crop",
+        principal=Decimal("160000"),
+        annual_interest_rate=Decimal("0.08"),
+        interest_method=InterestMethod.MONTHLY,
+        repayment_type=RepaymentType.INTEREST_ONLY,
+        tenure_months=12,
+        start_date=date(2026, 1, 10),
+    )
+    paid = loan("paid")
+    paid.payment_history[(2026, 1)] = Decimal("100")
+    simulation = engine([crop, paid], as_of_date=date(2026, 2, 28))
+    simulation.run(max_months=2)
+    reporter = Reporter(simulation.history, simulation.history, simulation.cashflow, [crop, paid])
+
+    report_path = tmp_path / "report.html"
+    reporter.generate_html_report(report_path)
+    report = report_path.read_text(encoding="utf-8")
+
+    assert "₹2,140.45" in report  # crop's independently accrued pending amount
+    assert "Jan 2026" in report  # paid loan's last recorded payment month
+    assert report.index("<strong>crop</strong>") < report.index("<strong>paid</strong>")
