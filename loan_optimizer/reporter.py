@@ -2,9 +2,19 @@ import pandas as pd
 from typing import List, Dict, Any
 from jinja2 import Environment, select_autoescape
 import json
+import io
+
+from decimal import Decimal
+
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+import matplotlib.ticker as mticker
 
 
 def format_inr(value):
+    if value is None or pd.isna(value):
+        return "—"
     try:
         val = float(value)
     except:
@@ -65,24 +75,115 @@ class Reporter:
             for loan_id, loan_data in month_data["loans"].items():
                 row = base_row.copy()
                 row["loan_id"] = loan_id
-                row["starting_balance"] = float(loan_data["starting_balance"])
-                row["interest"] = float(loan_data["interest"])
-                row["mandatory_payment"] = float(loan_data["mandatory_payment"])
-                row["extra_payment"] = float(loan_data["extra_payment"])
-                row["principal_paid"] = float(loan_data["principal_paid"])
-                row["ending_balance"] = float(loan_data["ending_balance"])
-                row["is_closed"] = loan_data.get("is_closed", False)
-                row["rolled_over"] = loan_data.get("rolled_over", False)
+                for field, value in loan_data.items():
+                    row[field] = float(value) if isinstance(value, Decimal) else value
                 rows.append(row)
         return pd.DataFrame(rows)
+
+    def _generate_payoff_chart_svg(self, opt_df: pd.DataFrame) -> str:
+        """
+        Generates the Loan Payoff chart as an inline SVG string
+        using matplotlib, for vector-quality rendering in PDF.
+        """
+        months = sorted(opt_df["month_index"].unique())
+        colors = [
+            "#3498db", "#e74c3c", "#2ecc71", "#f1c40f",
+            "#9b59b6", "#34495e", "#e67e22", "#1abc9c",
+        ]
+
+        fig, ax = plt.subplots(figsize=(10, 4.5))
+
+        for idx, loan_id in enumerate(self.loans.keys()):
+            loan_data = opt_df[opt_df["loan_id"] == loan_id].sort_values("month_index")
+            balances = []
+            for m in months:
+                row = loan_data[loan_data["month_index"] == m]
+                value = row["projected_ending_balance"].iloc[0] if not row.empty else None
+                balances.append(float(value) if value is not None and not pd.isna(value) else 0)
+            color = colors[idx % len(colors)]
+            ax.fill_between(months, balances, alpha=0.25, color=color)
+            ax.plot(months, balances, label=loan_id, color=color, linewidth=1.5)
+
+        ax.set_xlabel("Month")
+        ax.set_ylabel("Outstanding Balance (\u20b9)")
+        ax.set_title("Loan Payoff Over Time")
+        ax.legend(loc="upper right", fontsize=8)
+        ax.yaxis.set_major_formatter(
+            mticker.FuncFormatter(lambda x, _: f"\u20b9{x:,.0f}")
+        )
+        ax.grid(True, alpha=0.3)
+        fig.tight_layout()
+
+        # Export to SVG string
+        buf = io.StringIO()
+        fig.savefig(buf, format="svg")
+        plt.close(fig)
+        return buf.getvalue()
+
+    def generate_pdf_report(self, html_path: str, pdf_path: str):
+        """
+        Opens the HTML report in headless Chromium via Playwright
+        and prints to PDF with the @media print styles applied.
+        """
+        from playwright.sync_api import sync_playwright
+
+        with sync_playwright() as p:
+            browser = p.chromium.launch()
+            page = browser.new_page()
+
+            # Load the fully self-contained HTML file
+            page.goto(f"file:///{html_path}", wait_until="networkidle")
+
+            # Force all tab-content visible (belt-and-suspenders with CSS)
+            page.evaluate("""
+                document.querySelectorAll('.tab-content').forEach(el => {
+                    el.style.display = 'block';
+                    el.style.animation = 'none';
+                    el.style.opacity = '1';
+                });
+                const tabs = document.querySelector('.tabs');
+                if (tabs) tabs.remove();
+            """)
+
+            # Wait deterministically for full render before printing:
+            # 1. All tab-content sections are visible with laid-out content
+            # 2. The SVG chart element is present in the DOM
+            # 3. All fonts are loaded (affects text metrics / layout)
+            page.wait_for_function("""
+                () => {
+                    const sections = document.querySelectorAll('.tab-content');
+                    if (sections.length === 0) return false;
+                    const allVisible = [...sections].every(
+                        el => el.offsetHeight > 0
+                    );
+                    const svgReady = document.querySelector('svg') !== null;
+                    return allVisible && svgReady;
+                }
+            """, timeout=10000)
+            page.evaluate("() => document.fonts.ready")
+
+            page.pdf(
+                path=pdf_path,
+                format="A4",
+                landscape=False,
+                print_background=True,
+                margin={
+                    "top": "15mm",
+                    "bottom": "15mm",
+                    "left": "10mm",
+                    "right": "10mm",
+                },
+            )
+            browser.close()
+        print(f"PDF report saved to {pdf_path}")
 
     def generate_html_report(self, output_path: str):
         opt_df = self.to_dataframe(self.optimized_history)
         base_df = self.to_dataframe(self.baseline_history)
 
         # Overall Summary
-        opt_total_int = opt_df["interest"].sum()
-        base_total_int = base_df["interest"].sum()
+        opt_total_int = opt_df["projected_interest"].sum()
+        base_total_int = base_df["projected_interest"].sum()
         interest_saved = base_total_int - opt_total_int
 
         opt_months = opt_df["month_index"].max()
@@ -108,8 +209,8 @@ class Reporter:
         base_income = float(self.cashflow.monthly_income)
         base_expenses = float(self.cashflow.fixed_living_expenses)
 
-        total_mandatory = m1_df["mandatory_payment"].sum()
-        total_extra = m1_df["extra_payment"].sum()
+        total_mandatory = m1_df["projected_mandatory_payment"].sum()
+        total_extra = m1_df["projected_extra_payment"].sum()
 
         allocations = []
         allocations.append(
@@ -125,7 +226,7 @@ class Reporter:
         )
 
         for _, row in m1_df.iterrows():
-            total_pay = row["mandatory_payment"] + row["extra_payment"]
+            total_pay = row["projected_mandatory_payment"] + row["projected_extra_payment"]
             allocations.append(
                 {
                     "category": f"Loan: {row['loan_id']}",
@@ -152,23 +253,23 @@ class Reporter:
         # Loan level summary
         opt_loan_grp = opt_df.groupby("loan_id").agg(
             {
-                "interest": "sum",
-                "mandatory_payment": "sum",
-                "extra_payment": "sum",
+                "projected_interest": "sum",
+                "projected_mandatory_payment": "sum",
+                "projected_extra_payment": "sum",
                 "month_index": "max",
             }
         )
         base_loan_grp = base_df.groupby("loan_id").agg(
-            {"interest": "sum", "month_index": "max"}
+            {"projected_interest": "sum", "month_index": "max"}
         )
 
         loans_data = []
         for loan_id, opt_row in opt_loan_grp.iterrows():
             base_row = base_loan_grp.loc[loan_id]
-            int_saved = base_row["interest"] - opt_row["interest"]
+            int_saved = base_row["projected_interest"] - opt_row["projected_interest"]
             m_saved = base_row["month_index"] - opt_row["month_index"]
             rollovers = opt_df[
-                (opt_df["loan_id"] == loan_id) & (opt_df["rolled_over"] == True)
+                (opt_df["loan_id"] == loan_id) & (opt_df["projected_rolled_over"] == True)
             ].shape[0]
 
             closure_m = int(opt_row["month_index"])
@@ -178,10 +279,10 @@ class Reporter:
                 {
                     "loan_id": loan_id,
                     "principal": format_inr(self.loans[loan_id].principal),
-                    "total_interest": format_inr(opt_row["interest"]),
+                    "total_interest": format_inr(opt_row["projected_interest"]),
                     "interest_saved": format_inr(int_saved),
                     "total_payments": format_inr(
-                        opt_row["mandatory_payment"] + opt_row["extra_payment"]
+                        opt_row["projected_mandatory_payment"] + opt_row["projected_extra_payment"]
                     ),
                     "closure_month": closure_str,
                     "months_saved": int(m_saved),
@@ -197,17 +298,25 @@ class Reporter:
             month_str = m_date.strftime("%B %Y")
             loans_list = []
             for _, row in group.iterrows():
-                total_payment = row["mandatory_payment"] + row["extra_payment"]
                 loans_list.append(
                     {
                         "loan_id": row["loan_id"],
-                        "start_bal": format_inr(row["starting_balance"]),
-                        "interest": format_inr(row["interest"]),
-                        "emi": format_inr(row["mandatory_payment"]),
-                        "extra": format_inr(row["extra_payment"]),
-                        "total_pay": format_inr(total_payment),
-                        "end_bal": format_inr(row["ending_balance"]),
-                        "rolled_over": "Yes" if row.get("rolled_over", False) else "",
+                        "projected_start": format_inr(row["projected_starting_balance"]),
+                        "projected_interest": format_inr(row["projected_interest"]),
+                        "projected_required": format_inr(row["projected_required_payment"]),
+                        "projected_mandatory": format_inr(row["projected_mandatory_payment"]),
+                        "projected_extra": format_inr(row["projected_extra_payment"]),
+                        "projected_principal": format_inr(row["projected_principal_paid"]),
+                        "projected_end": format_inr(row["projected_ending_balance"]),
+                        "projected_closed": "Yes" if row.get("projected_is_closed", False) else "",
+                        "projected_rolled_over": "Yes" if row.get("projected_rolled_over", False) else "",
+                        "actual_start": format_inr(row["actual_starting_balance"]),
+                        "actual_interest": format_inr(row["actual_interest"]),
+                        "actual_required": format_inr(row["actual_required_payment"]),
+                        "actual_payment": format_inr(row["actual_payment"]),
+                        "actual_pending": format_inr(row["actual_pending_payment"]),
+                        "actual_accumulated_pending": format_inr(row["actual_accumulated_pending_payment"]),
+                        "actual_end": format_inr(row["actual_ending_balance"]),
                     }
                 )
             master_schedule.append(
@@ -218,44 +327,8 @@ class Reporter:
                 }
             )
 
-        # Prepare chart data
-        months = sorted(opt_df["month_index"].unique())
-        chart_labels = [f"Month {int(m)}" for m in months]
-        chart_datasets = []
-
-        colors = [
-            "#3498db",
-            "#e74c3c",
-            "#2ecc71",
-            "#f1c40f",
-            "#9b59b6",
-            "#34495e",
-            "#e67e22",
-            "#1abc9c",
-        ]
-
-        for idx, loan_id in enumerate(self.loans.keys()):
-            loan_data = opt_df[opt_df["loan_id"] == loan_id].sort_values("month_index")
-            balances = []
-            for m in months:
-                row = loan_data[loan_data["month_index"] == m]
-                if not row.empty:
-                    balances.append(float(row["ending_balance"].iloc[0]))
-                else:
-                    balances.append(0)
-            chart_datasets.append(
-                {
-                    "label": loan_id,
-                    "data": balances,
-                    "fill": True,
-                    "backgroundColor": colors[idx % len(colors)] + "40",
-                    "borderColor": colors[idx % len(colors)],
-                    "tension": 0.4,
-                }
-            )
-
-        chart_labels_json = json.dumps(chart_labels)
-        chart_datasets_json = json.dumps(chart_datasets)
+        # Generate vector SVG chart
+        chart_svg = self._generate_payoff_chart_svg(opt_df)
 
         template_str = """
         <!DOCTYPE html>
@@ -291,12 +364,48 @@ class Reporter:
                 tr:hover { background-color: #f5f5f5; }
                 .positive { color: #27ae60; font-weight: bold; }
                 .warning { color: #e67e22; font-weight: bold; }
-                .month-group { margin-bottom: 30px; background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+                .month-group { margin-bottom: 30px; background: #fff; border-radius: 8px; border: 1px solid #e1e8ed; overflow: visible; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
                 .month-header { background-color: #34495e; color: #fff; padding: 12px 20px; font-weight: bold; font-size: 15px; }
-                .month-group table { margin-top: 0; border: none; box-shadow: none; }
+                .table-scroll { overflow-x: auto; border-radius: 0 0 8px 8px; }
+                .month-group table { min-width: 2050px; margin-top: 0; border: none; box-shadow: none; }
                 .month-group th { background-color: #f8fafc; color: #7f8c8d; border-bottom: 2px solid #e1e8ed; font-size: 12px; }
                 .month-group td, .month-group th { padding: 10px 20px; }
                 .footer { margin-top: 40px; text-align: center; font-size: 12px; color: #bdc3c7; }
+
+                /* ---------- Print / PDF layout ---------- */
+                @media print {
+                    @page {
+                        size: A4 portrait;
+                        margin: 15mm 10mm;
+                    }
+
+                    /* Show all content linearly — hide tab nav, kill fade animation */
+                    .tabs            { display: none !important; }
+                    .tab-content     { display: block !important; animation: none !important; opacity: 1 !important; }
+
+                    /* Page-break hygiene */
+                    .summary-cards   { break-inside: avoid; }
+                    .card            { break-inside: avoid; }
+                    table            { break-inside: auto; }
+                    tr               { break-inside: avoid; }
+                    thead            { display: table-header-group; }
+                    .month-group     { break-inside: avoid; }
+                    .month-group table tr { break-inside: avoid; }
+                    .table-scroll    { overflow: visible; }
+                    .month-group table { min-width: 0; }
+
+                    /* Chart container */
+                    .chart-container { break-inside: avoid; }
+
+                    /* Portrait-friendly: shrink table text to fit 8 columns */
+                    .month-group td, .month-group th { padding: 6px 8px; font-size: 11px; }
+                    th, td { padding: 8px 10px; font-size: 12px; }
+
+                    /* Clean print appearance */
+                    .container       { box-shadow: none; padding: 0; }
+                    .month-group     { box-shadow: none; }
+                    body             { background: #fff; padding: 10px; }
+                }
             </style>
         </head>
         <body>
@@ -335,8 +444,8 @@ class Reporter:
                     </div>
 
                     <h2>Loan Payoff Graph</h2>
-                    <div class="chart-container" style="position: relative; height:400px; width:100%; margin-bottom: 30px; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e1e8ed; box-sizing: border-box;">
-                        <canvas id="payoffChart"></canvas>
+                    <div class="chart-container" style="width:100%; margin-bottom: 30px; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); border: 1px solid #e1e8ed; box-sizing: border-box;">
+                        {{ chart_svg|safe }}
                     </div>
 
                     <h2>Month 1: Income Allocation Breakdown</h2>
@@ -399,38 +508,58 @@ class Reporter:
                     {% for month_group in master_schedule %}
                     <div class="month-group">
                         <div class="month-header">{{ month_group.month_str|safe }}</div>
+                        <div class="table-scroll">
                         <table>
                             <thead>
                                 <tr>
                                     <th>Loan ID</th>
-                                    <th>Starting Balance</th>
-                                    <th>Interest</th>
-                                    <th>Mandatory Payment</th>
-                                    <th>Extra Prepayment</th>
-                                    <th>Total Payment</th>
-                                    <th>Ending Balance</th>
-                                    <th>Notes</th>
+                                    <th>Projected Start</th>
+                                    <th>Projected Interest</th>
+                                    <th>Projected Required</th>
+                                    <th>Projected Mandatory</th>
+                                    <th>Projected Extra</th>
+                                    <th>Projected Principal</th>
+                                    <th>Projected End</th>
+                                    <th>Projected Closed</th>
+                                    <th>Projected Rollover</th>
+                                    <th>Actual Start</th>
+                                    <th>Actual Interest</th>
+                                    <th>Actual Required</th>
+                                    <th>Actual Payment</th>
+                                    <th>Actual Pending</th>
+                                    <th>Actual Accumulated Pending</th>
+                                    <th>Actual End</th>
                                 </tr>
                             </thead>
                             <tbody>
                                 {% for row in month_group.loans %}
                                 <tr>
                                     <td><strong>{{ row.loan_id }}</strong></td>
-                                    <td>{{ row.start_bal }}</td>
-                                    <td>{{ row.interest }}</td>
-                                    <td>{{ row.emi }}</td>
-                                    <td>{{ row.extra }}</td>
-                                    <td><strong>{{ row.total_pay }}</strong></td>
-                                    <td>{{ row.end_bal }}</td>
-                                    {% if row.rolled_over == 'Yes' %}
+                                    <td>{{ row.projected_start }}</td>
+                                    <td>{{ row.projected_interest }}</td>
+                                    <td>{{ row.projected_required }}</td>
+                                    <td>{{ row.projected_mandatory }}</td>
+                                    <td>{{ row.projected_extra }}</td>
+                                    <td>{{ row.projected_principal }}</td>
+                                    <td>{{ row.projected_end }}</td>
+                                    <td>{{ row.projected_closed }}</td>
+                                    {% if row.projected_rolled_over == 'Yes' %}
                                     <td class="warning">Rolled Over</td>
                                     {% else %}
                                     <td></td>
                                     {% endif %}
+                                    <td>{{ row.actual_start }}</td>
+                                    <td>{{ row.actual_interest }}</td>
+                                    <td>{{ row.actual_required }}</td>
+                                    <td>{{ row.actual_payment }}</td>
+                                    <td>{{ row.actual_pending }}</td>
+                                    <td><strong>{{ row.actual_accumulated_pending }}</strong></td>
+                                    <td>{{ row.actual_end }}</td>
                                 </tr>
                                 {% endfor %}
                             </tbody>
                         </table>
+                        </div>
                     </div>
                     {% endfor %}
                 </div>
@@ -440,7 +569,6 @@ class Reporter:
                 </div>
             </div>
 
-            <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
             <script>
             function openTab(evt, tabName) {
                 var i, tabcontent, tablinks;
@@ -460,61 +588,6 @@ class Reporter:
                 document.getElementById(tabName).classList.add("active");
                 evt.currentTarget.classList.add("active");
             }
-
-            const ctx = document.getElementById('payoffChart').getContext('2d');
-            const payoffChart = new Chart(ctx, {
-                type: 'line',
-                data: {
-                    labels: {{ chart_labels_json|safe }},
-                    datasets: {{ chart_datasets_json|safe }}
-                },
-                options: {
-                    responsive: true,
-                    maintainAspectRatio: false,
-                    interaction: {
-                        mode: 'index',
-                        intersect: false,
-                    },
-                    plugins: {
-                        tooltip: {
-                            callbacks: {
-                                label: function(context) {
-                                    let label = context.dataset.label || '';
-                                    if (label) {
-                                        label += ': ';
-                                    }
-                                    if (context.parsed.y !== null) {
-                                        label += new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR' }).format(context.parsed.y);
-                                    }
-                                    return label;
-                                }
-                            }
-                        }
-                    },
-                    scales: {
-                        x: {
-                            display: true,
-                            title: {
-                                display: true,
-                                text: 'Month'
-                            }
-                        },
-                        y: {
-                            stacked: true,
-                            display: true,
-                            title: {
-                                display: true,
-                                text: 'Outstanding Balance (₹)'
-                            },
-                            ticks: {
-                                callback: function(value, index, values) {
-                                    return new Intl.NumberFormat('en-IN', { style: 'currency', currency: 'INR', maximumSignificantDigits: 3 }).format(value);
-                                }
-                            }
-                        }
-                    }
-                }
-            });
             </script>
         </body>
         </html>
@@ -528,8 +601,7 @@ class Reporter:
             loans=loans_data,
             master_schedule=master_schedule,
             base_income=format_inr(base_income),
-            chart_labels_json=chart_labels_json,
-            chart_datasets_json=chart_datasets_json,
+            chart_svg=chart_svg,
         )
 
         with open(output_path, "w", encoding="utf-8") as f:

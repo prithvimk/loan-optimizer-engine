@@ -38,6 +38,17 @@ uv sync
 
 A fresh `report.html` file will be generated in your project directory. Open it in any web browser to view your optimized amortization schedule!
 
+## Recording actual payments
+
+Optionally add a `payments.csv` next to `config.yaml` with the columns below:
+
+```csv
+loan_id,date,amount
+Sample Home Loan,2026-01-15,45000
+```
+
+Dates are matched by calendar month, so the day does not need to match the loan's start day. Multiple entries for the same loan and month are added together. A recorded payment replaces the projected payment for that loan-month; the report shows its current shortfall and the running **Accumulated Pending Payment** for each loan. Run the simulation with `uv run main.py` and tests with `uv run pytest`.
+
 ## Supported Loan Types
 
 - **`EMI`**: Standard Equated Monthly Installment loans (e.g., Home Loans, Car Loans).

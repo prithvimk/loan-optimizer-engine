@@ -2,6 +2,7 @@ from dataclasses import dataclass, field
 from decimal import Decimal
 from enum import Enum, auto
 from datetime import date
+from typing import Dict, Tuple
 
 
 class InterestMethod(Enum):
@@ -44,7 +45,10 @@ class Loan:
     start_date: date
     allows_prepayment: bool = True
     current_balance: Decimal = field(init=False)
-    is_closed: bool = field(default=False, init=False)
+    # Recorded payments, grouped by (year, month). Values remain Decimal so the
+    # simulation never loses currency precision while replaying history.
+    payment_history: Dict[Tuple[int, int], Decimal] = field(default_factory=dict)
+    is_closed: bool = field(init=False, default=False)
 
     def __post_init__(self):
         self.current_balance = self.principal
