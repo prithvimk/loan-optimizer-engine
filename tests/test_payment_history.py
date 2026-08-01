@@ -60,6 +60,23 @@ loans:
     assert cashflow.irregular_inflows == {2: Decimal("25")}
 
 
+def test_config_accepts_half_yearly_interest_method(tmp_path):
+    config = tmp_path / "config.yaml"
+    config.write_text(
+        """loans:
+  - loan_id: half-yearly
+    principal: 100
+    annual_interest_rate: 0.12
+    interest_method: HALF_YEARLY
+    tenure_months: 12
+    start_date: "2026-01-01"
+"""
+    )
+
+    loans, _, _ = load_config(config)
+    assert loans[0].interest_method is InterestMethod.HALF_YEARLY
+
+
 def test_month_keyed_payments_aggregate_and_replace_projection(tmp_path):
     item = loan()
     payments = tmp_path / "payments.csv"
@@ -151,6 +168,70 @@ def test_actual_columns_are_blank_after_as_of_month():
     assert february["projected_mandatory_payment"] == Decimal("75.00")
     assert february["actual_payment"] is None
     assert february["actual_ending_balance"] is None
+
+
+def test_half_yearly_interest_posts_on_six_month_anniversaries():
+    item = Loan(
+        loan_id="half-yearly",
+        principal=Decimal("1000"),
+        annual_interest_rate=Decimal("0.12"),
+        interest_method=InterestMethod.HALF_YEARLY,
+        repayment_type=RepaymentType.INTEREST_ONLY,
+        tenure_months=24,
+        start_date=date(2026, 1, 10),
+    )
+    simulation = engine([item], income="0", as_of_date=date(2027, 1, 31))
+    simulation.run(max_months=12)
+
+    records = [month["loans"]["half-yearly"] for month in simulation.history]
+    assert [record["projected_interest"] for record in records[:5]] == [
+        Decimal("0.00")
+    ] * 5
+    assert records[5]["projected_interest"] == Decimal("60.00")
+    assert records[5]["projected_required_payment"] == Decimal("60.00")
+    assert records[11]["projected_interest"] == Decimal("63.60")
+    assert records[5]["actual_interest"] == Decimal("60.00")
+
+
+def test_half_yearly_interest_is_anchored_to_each_loan_start_month():
+    item = Loan(
+        loan_id="mid-year",
+        principal=Decimal("1000"),
+        annual_interest_rate=Decimal("0.12"),
+        interest_method=InterestMethod.HALF_YEARLY,
+        repayment_type=RepaymentType.INTEREST_ONLY,
+        tenure_months=24,
+        start_date=date(2026, 3, 10),
+    )
+    simulation = engine([item], income="0", as_of_date=date(2026, 8, 31))
+    simulation.run(max_months=6)
+
+    records = [month["loans"]["mid-year"] for month in simulation.history]
+    assert [record["projected_interest"] for record in records[:5]] == [
+        Decimal("0.00")
+    ] * 5
+    assert records[5]["projected_interest"] == Decimal("60.00")
+
+
+def test_half_yearly_emi_remains_required_monthly():
+    item = Loan(
+        loan_id="half-yearly-emi",
+        principal=Decimal("1200"),
+        annual_interest_rate=Decimal("0.12"),
+        interest_method=InterestMethod.HALF_YEARLY,
+        repayment_type=RepaymentType.EMI,
+        tenure_months=12,
+        start_date=date(2026, 1, 10),
+    )
+    simulation = engine([item], income="1000", as_of_date=date(2026, 6, 30))
+    simulation.run(max_months=6)
+
+    january = simulation.history[0]["loans"]["half-yearly-emi"]
+    june = simulation.history[5]["loans"]["half-yearly-emi"]
+    assert january["projected_required_payment"] > Decimal("0")
+    assert january["projected_interest"] == Decimal("0.00")
+    assert june["projected_required_payment"] > Decimal("0")
+    assert june["projected_interest"] > Decimal("0")
 
 
 @pytest.mark.parametrize(

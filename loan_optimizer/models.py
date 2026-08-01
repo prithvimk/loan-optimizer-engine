@@ -10,6 +10,7 @@ class InterestMethod(Enum):
 
     MONTHLY = auto()
     DAILY = auto()
+    HALF_YEARLY = auto()
 
 
 class RepaymentType(Enum):

@@ -34,3 +34,11 @@ loans:
     repayment_type: "EMI"
     tenure_months: 36
     start_date: "2026-03-01"
+
+  - loan_id: "Sample Half-Yearly Gold Loan"
+    principal: 300000
+    annual_interest_rate: 0.10
+    interest_method: "HALF_YEARLY"
+    repayment_type: "INTEREST_ONLY"
+    tenure_months: 12
+    start_date: "2026-01-01"

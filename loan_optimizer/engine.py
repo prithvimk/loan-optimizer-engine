@@ -134,6 +134,7 @@ class SimulationEngine:
                 loan.annual_interest_rate,
                 loan.interest_method,
                 self.current_date,
+                loan.start_date,
             )
             loan.current_balance += interest
             required = self._required_payment(loan, interest)
@@ -195,6 +196,7 @@ class SimulationEngine:
                 loan.annual_interest_rate,
                 loan.interest_method,
                 self.current_date,
+                loan.start_date,
             )
             loan.current_balance += interest
             required = self._required_payment(loan, interest)

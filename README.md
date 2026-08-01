@@ -55,6 +55,12 @@ Dates are matched by calendar month, so the day does not need to match the loan'
 - **`INTEREST_ONLY`**: Pay only the interest every month, with the principal due at the end of the `tenure_months` (e.g., Gold Loans). If your cash flow can't cover the principal, it rolls over automatically for another term.
 - **`BULLET`**: No payments until the end of the `tenure_months`, where Principal + Interest is demanded.
 
+## Interest Methods
+
+- **`MONTHLY`**: Interest is posted every month.
+- **`DAILY`**: Interest is calculated using the actual number of days in each month.
+- **`HALF_YEARLY`**: Interest is posted every sixth month from the loan's start month, at half the annual rate. This can be used with any repayment type; EMI installments remain monthly.
+
 ## Strategies
 
 By default, the engine uses the **Avalanche Optimizer** (Highest Interest Rate priority). It also runs a hidden Baseline simulation (No Prepayments) to calculate your exact Total Interest Saved and Months Saved!
